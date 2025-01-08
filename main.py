@@ -100,13 +100,19 @@ class CreateChannelRequest(BaseModel):
     name: str
     channel_type: ChannelType
     creator_id: str
+    description: str
 
 class ChannelResponse(Response):
     channel: Channel
 
 @app.post("/create_channel")
 async def create_channel(request: CreateChannelRequest) -> ChannelResponse:
-    channel = dl.create_channel(request.name, request.channel_type, request.creator_id)
+    channel = dl.create_channel(
+        request.name, 
+        request.channel_type, 
+        request.creator_id,
+        request.description
+    )
     return ChannelResponse(message="Channel created successfully", ok=True, channel=channel)
 
 class JoinChannelRequest(BaseModel):
@@ -114,12 +120,25 @@ class JoinChannelRequest(BaseModel):
     channel_name: str
 
 class JoinChannelResponse(Response):
-    channel_membership: ChannelMembership
+    channel_membership: Optional[ChannelMembership] = None
 
 @app.post("/join_channel")
 async def join_channel(request: JoinChannelRequest) -> JoinChannelResponse:
     user = dl.get_user_by_username(request.username)
     channel = dl.get_channel_by_name(request.channel_name)
+
+    if channel is None:
+        return JoinChannelResponse(message="Channel not found", ok=False, channel_membership=None)
+
+    if user is None:
+        return JoinChannelResponse(message="User not found", ok=False, channel_membership=None)
+
+    # check if user is already in the channel
+    current_members = dl.get_users_in_channel(channel.id)
+    if user in current_members:
+        return JoinChannelResponse(message="User already in the channel", ok=False, channel_membership=None)
+
+    channel.members_count += 1
 
     membership = dl.join_channel(user.id, channel.id)
     return JoinChannelResponse(message="User joined channel successfully", ok=True, channel_membership=membership)
@@ -228,6 +247,43 @@ async def remove_reaction(request: ReactionRequest) -> Response:
             del message.reactions[request.reaction]
     
     return Response(message="Reaction removed", ok=True)
+
+
+class SearchChannelsResponse(Response):
+    channels: List[Channel]
+
+@app.get("/search_channels")
+async def search_channels(prefix: str = Query(...)) -> SearchChannelsResponse:
+    channels = dl.search_channels(prefix)
+    return SearchChannelsResponse(
+        message="Channels found successfully", 
+        ok=True, 
+        channels=channels
+    )
+
+
+class AddThreadRequest(BaseModel):
+    message_id: str
+    channel_id: str
+
+
+@app.post("/add_thread")
+async def add_thread(request: AddThreadRequest) -> Response:
+    message = dl.get_message(request.message_id)
+    channel = dl.get_channel(request.channel_id)
+
+    if not message:
+        return Response(message="Message not found", ok=False)
+
+    if message.has_thread:
+        return Response(message="Message already has a thread", ok=False)
+
+    if not channel:
+        return Response(message="Channel not found", ok=False)
+
+    message.has_thread = True
+    message.thread = channel
+    return Response(message="Thread added successfully", ok=True)
 
 if __name__ == "__main__":
     import uvicorn

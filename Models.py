@@ -34,6 +34,9 @@ class Channel(BaseModel):
     created_at: str
     name: str
     channel_type: ChannelType
+    description: str
+    members_count: int = 0
+
 
 class ChannelMembership(BaseModel):
     user_id: str
@@ -47,3 +50,7 @@ class Message(BaseModel):
     content: str
     channel_id: str
     reactions: Dict[str, int] = {}  # Default to empty dict
+    has_thread: bool = False
+    has_image: bool = False
+    thread: Optional[Channel] = None
+    image: Optional[str] = None

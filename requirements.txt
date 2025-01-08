@@ -6,3 +6,4 @@ pydantic==2.6.1
 python-multipart==0.0.9
 pytest
 httpx
+websockets

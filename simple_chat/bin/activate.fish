@@ -33,7 +33,7 @@ end
 # Unset irrelevant variables.
 deactivate nondestructive
 
-set -gx VIRTUAL_ENV /home/lthlnkso/projects/gauntlet/simplechat/simple_chat
+set -gx VIRTUAL_ENV /home/lthlnkso/projects/ChatGenius/simplechat/simple_chat
 
 set -gx _OLD_VIRTUAL_PATH $PATH
 set -gx PATH "$VIRTUAL_ENV/"bin $PATH

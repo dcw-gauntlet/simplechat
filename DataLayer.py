@@ -1,9 +1,6 @@
 import uuid
 from Models import *
 
-
-User.create(username="admin", password="admin", profile_picture="")
-
 class DataLayer:
     def __init__(self):
         self.users = {}  # Key: user_id, Value: User object
@@ -88,14 +85,16 @@ class DataLayer:
         """Get a user by their username."""
         return next((user for user in self.users.values() if user.username == username), None)
 
-    def create_channel(self, name, channel_type, creator_id):
+    def create_channel(self, name, channel_type, creator_id, description):
         """Create a new channel."""
         channel = Channel(
             id=str(uuid.uuid4()),
             created_at=datetime.now().isoformat(),
             name=name, 
             channel_type=channel_type, 
-            creator_id=creator_id
+            creator_id=creator_id,
+            description=description,
+            members_count=0,
         )
 
         self.add_channel(channel)
@@ -116,5 +115,13 @@ class DataLayer:
         """Get all messages for a specific channel."""
         return [msg for msg in self.messages.values() if msg.channel_id == channel_id]
 
+    def search_channels(self, prefix: str):
+        """Search for channels by name prefix."""
+        return [
+            channel for channel in self.channels.values()
+            if channel.name.lower().startswith(prefix.lower())
+        ]
 
 
+
+dl = DataLayer()
