@@ -142,6 +142,15 @@ class DataLayer:
             return Channel(**channel_data)
         return None
 
+    def get_channel_by_id(self, channel_id: str) -> Channel | None:
+        """Get a channel by its ID."""
+        self.cursor.execute("SELECT * FROM channels WHERE id = %s", (channel_id,))
+        channel_data = self.cursor.fetchone()
+        if channel_data:
+            channel_data['created_at'] = channel_data['created_at'].isoformat()
+            return Channel(**channel_data)
+        return None
+
 
     def add_message(self, message: Message):
         thread_id = message.thread.id if message.thread else None
@@ -245,19 +254,29 @@ class DataLayer:
 
     def get_channels_for_user(self, user_id: str, channel_type: ChannelType) -> list[Channel]:
         """Get all channels a specific user is part of."""
-        self.cursor.execute("""
-            SELECT 
-                c.id,
-                c.created_at,
-                c.name,
-                c.channel_type,
-                c.description,
-                c.members_count,
-                c.creator_id
-            FROM channels c
-            JOIN channel_memberships cm ON c.id = cm.channel_id
-            WHERE cm.user_id = %s AND c.channel_type = %s
-        """, (user_id, channel_type))
+        if channel_type == ChannelType.ALL:
+            query = """
+                SELECT DISTINCT
+                    c.*
+                FROM channels c
+                INNER JOIN channel_memberships cm ON c.id = cm.channel_id
+                WHERE cm.user_id = %s
+                ORDER BY c.created_at DESC
+            """
+            params = (user_id,)
+        else:
+            query = """
+                SELECT DISTINCT
+                    c.*
+                FROM channels c
+                INNER JOIN channel_memberships cm ON c.id = cm.channel_id
+                WHERE cm.user_id = %s 
+                AND c.channel_type = %s
+                ORDER BY c.created_at DESC
+            """
+            params = (user_id, channel_type.value)
+        
+        self.cursor.execute(query, params)
         channel_data = self.cursor.fetchall()
         return [Channel(**{**channel, 'created_at': channel['created_at'].isoformat()}) 
                 for channel in channel_data]
@@ -316,10 +335,10 @@ class DataLayer:
        """Get all channels a specific user is part of."""
        return self.get_channels_for_user(user_id, channel_type)
        
-    def create_channel(self, name: str, channel_type: str, creator_id: str, description: str) -> Channel:
+    def create_channel(self, name: str, channel_type: str, creator_id: str, description: str, channel_id: str = None) -> Channel:
         """Create a new channel."""
         channel = Channel(
-            id=str(uuid.uuid4()),
+            id=channel_id if channel_id else str(uuid.uuid4()),
             created_at=datetime.now().isoformat(),
             name=name,
             channel_type=channel_type,
@@ -338,11 +357,23 @@ class DataLayer:
 
     def send_message(self, message: Message):
         """Send a message to a channel."""
-        thread_id = message.thread.id if message.has_thread else None
+        thread_id = message.thread_id if message.has_thread else None
         try:
             self.cursor.execute(
                 "INSERT INTO messages (id, sent, text, content, channel_id, sender_id, reactions, has_thread, has_image, thread_id, image) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                (message.id, message.sent, message.text, message.content, message.channel_id, message.sender.id, json.dumps(message.reactions), message.has_thread, message.has_image, thread_id, message.image)
+                (
+                    message.id,
+                    message.sent,
+                    message.text,
+                    message.content,
+                    message.channel_id,
+                    message.sender.id,
+                    json.dumps(message.reactions),
+                    message.has_thread,
+                    message.has_image,
+                    thread_id,
+                    message.image
+                )
             )
             return self.get_message(message.id)  # Return the full message with sender info
         except Exception as e:

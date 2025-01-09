@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import shutil
 import os
+import hashlib
 
 app = FastAPI()
 dl = DataLayer()
@@ -101,18 +102,42 @@ class CreateChannelRequest(BaseModel):
     channel_type: ChannelType
     creator_id: str
     description: str
+    recipient_id: Optional[str] = None
 
 class ChannelResponse(Response):
     channel: Channel
 
 @app.post("/create_channel")
 async def create_channel(request: CreateChannelRequest) -> ChannelResponse:
+    if request.channel_type == ChannelType.DM:
+        if not request.recipient_id:
+            return ChannelResponse(message="Recipient ID required for DM channels", ok=False, channel=None)
+            
+        # Sort IDs to ensure same hash regardless of order
+        user_ids = sorted([request.creator_id, request.recipient_id])
+        dm_string = f"{user_ids[0]}_{user_ids[1]}"
+        # Create UUID-like hash (32 chars)
+        channel_id = hashlib.md5(dm_string.encode()).hexdigest()[:32]
+        
+        # Use recipient's username or a generated name
+        dm_name = f"DM_{request.recipient_id}"  # You might want to use username instead
+    else:
+        channel_id = str(uuid.uuid4())
+        dm_name = request.name
+
+    # if channel already exists, return the existing channel
+    existing_channel = dl.get_channel_by_id(channel_id)
+    if existing_channel:
+        return ChannelResponse(message="Channel already exists", ok=True, channel=existing_channel)
+
     channel = dl.create_channel(
-        request.name, 
-        request.channel_type, 
-        request.creator_id,
-        request.description
+        name=dm_name,
+        channel_type=request.channel_type,
+        creator_id=request.creator_id,
+        description=request.description,
+        channel_id=channel_id
     )
+
     return ChannelResponse(message="Channel created successfully", ok=True, channel=channel)
 
 class JoinChannelRequest(BaseModel):
@@ -336,6 +361,16 @@ async def get_channel(channel_id: str) -> ChannelResponse:
     return ChannelResponse(message="Channel found successfully", ok=True, channel=channel)
 
 
+class GetUserRequest(BaseModel):
+    user_id: str
+
+class GetUserResponse(Response):
+    user: User
+
+@app.post("/get_user")
+async def get_user(request: GetUserRequest) -> GetUserResponse:
+    user = dl.get_user(request.user_id)
+    return GetUserResponse(message="User found successfully", ok=True, user=user)
 
 
 
