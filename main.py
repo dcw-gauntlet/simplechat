@@ -135,23 +135,31 @@ async def join_channel(request: JoinChannelRequest) -> JoinChannelResponse:
 
     # check if user is already in the channel
     current_members = dl.get_users_in_channel(channel.id)
-    if user in current_members:
+    if any(member.id == user.id for member in current_members):
         return JoinChannelResponse(message="User already in the channel", ok=False, channel_membership=None)
 
-    channel.members_count += 1
-
+    # Create the membership
     membership = dl.join_channel(user.id, channel.id)
+
+    # Update the channel's member count
+    channel.members_count += 1
+    dl.cursor.execute(
+        "UPDATE channels SET members_count = %s WHERE id = %s",
+        (channel.members_count, channel.id)
+    )
+
     return JoinChannelResponse(message="User joined channel successfully", ok=True, channel_membership=membership)
 
 class MyChannelsRequest(BaseModel):
     user_id: str
+    channel_type: ChannelType
 
 class MyChannelsResponse(Response):
     channels: List[Channel]
 
-@app.get("/my_channels")
-async def my_channels(user_id: str = Query(...)) -> MyChannelsResponse:
-    channels = dl.get_my_channels(user_id)
+@app.post("/my_channels")
+async def my_channels(request: MyChannelsRequest) -> MyChannelsResponse:
+    channels = dl.get_my_channels(request.user_id, request.channel_type)
     return MyChannelsResponse(message="Channels fetched successfully", ok=True, channels=channels)
 
 class GetChannelMessagesRequest(BaseModel):
@@ -171,12 +179,28 @@ class SendMessageRequest(BaseModel):
     content: str
 
 class SendMessageResponse(Response):
-    sent_message: Message
+    sent_message: Optional[Message] = None
 
 @app.post("/send_message")
 async def send_message(request: SendMessageRequest) -> SendMessageResponse:
+    """
+    class Message(BaseModel):
+        id: str
+        sent: str
+        text: str
+        sender: User
+        content: str
+        channel_id: str
+        reactions: Dict[str, int] = {}  # Default to empty dict
+        has_thread: bool = False
+        has_image: bool = False
+        thread_id: Optional[Str] = None
+        image: Optional[str] = None
+    """
     # Get the full user object
-    user = dl.get_user(request.user_id)  # Assuming user_id is username
+    # print(request.dict())
+
+    user = dl.get_user(request.user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -184,13 +208,18 @@ async def send_message(request: SendMessageRequest) -> SendMessageResponse:
         id=str(uuid.uuid4()),
         sent=datetime.utcnow().isoformat(),
         text=request.content,
-        sender=user,  # Use the full user object
+        sender=user,
         content=request.content,
         channel_id=request.channel_id,
-        reactions={}
+        reactions={},
+        has_thread=False,
+        has_image=False,
+        thread_id=None,
+        image=None
     )
     
     saved_message = dl.send_message(message)
+
     return SendMessageResponse(message="Message sent successfully", ok=True, sent_message=saved_message)
 
 
@@ -282,8 +311,33 @@ async def add_thread(request: AddThreadRequest) -> Response:
         return Response(message="Channel not found", ok=False)
 
     message.has_thread = True
-    message.thread = channel
+    message.thread_id = channel.id
+
+    # Add the original message sender to the thread channel
+    dl.join_channel(message.sender.id, channel.id)
+    
+    # Update member count
+    channel.members_count += 1
+    dl.cursor.execute(
+        "UPDATE channels SET members_count = %s WHERE id = %s",
+        (channel.members_count, channel.id)
+    )
+
+    dl.add_thread(message)
+
     return Response(message="Thread added successfully", ok=True)
+
+
+@app.get("/get_channel/{channel_id}")
+async def get_channel(channel_id: str) -> ChannelResponse:
+    channel = dl.get_channel(channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    return ChannelResponse(message="Channel found successfully", ok=True, channel=channel)
+
+
+
+
 
 if __name__ == "__main__":
     import uvicorn

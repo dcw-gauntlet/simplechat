@@ -15,6 +15,7 @@ class ChannelType(str, Enum):
     GROUP = 'conversation'
     THREAD = 'thread'
     DM = 'dm'
+    ALL = 'all'
 
 class User(BaseModel):
     id: str
@@ -36,6 +37,7 @@ class Channel(BaseModel):
     channel_type: ChannelType
     description: str
     members_count: int = 0
+    creator_id: str
 
 
 class ChannelMembership(BaseModel):
@@ -52,5 +54,5 @@ class Message(BaseModel):
     reactions: Dict[str, int] = {}  # Default to empty dict
     has_thread: bool = False
     has_image: bool = False
-    thread: Optional[Channel] = None
+    thread_id: Optional[str] = None
     image: Optional[str] = None
