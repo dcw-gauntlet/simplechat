@@ -289,9 +289,14 @@ class ReactionRequest(BaseModel):
 
 @app.post("/add_reaction")
 async def add_reaction(request: ReactionRequest) -> Response:
+    print(f"Adding reaction '{request.reaction}' to message {request.message_id}")
+    
     message = dl.get_message(request.message_id)
     if not message:
+        print(f"Message {request.message_id} not found")
         raise HTTPException(status_code=404, detail="Message not found")
+    
+    print(f"Found message: {message.dict()}")
     
     # Initialize reactions dict if it doesn't exist
     if not hasattr(message, 'reactions'):
@@ -302,6 +307,11 @@ async def add_reaction(request: ReactionRequest) -> Response:
         message.reactions[request.reaction] += 1
     else:
         message.reactions[request.reaction] = 1
+    
+    # Save the updated reactions
+    success = dl.update_message_reactions(request.message_id, message.reactions)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to update reactions")
     
     return Response(message="Reaction added", ok=True)
 

@@ -4,7 +4,7 @@ from Models import *
 import json
 import uuid
 from datetime import datetime
-from typing import List
+from typing import List, Dict
 
 """
 CREATE TABLE users (
@@ -297,41 +297,59 @@ class DataLayer:
 
     def get_message(self, message_id: str) -> Message | None:
         """Get a message by its ID."""
-        self.cursor.execute("""
-            SELECT 
-                m.id as message_id,
-                m.sent,
-                m.text,
-                m.content,
-                m.channel_id,
-                m.reactions,
-                m.has_thread,
-                m.has_image,
-                m.thread_id,
-                m.image,
-                m.file_id,
-                f.filename as file_name,
-                f.content_type as file_content_type,
-                u.id as user_id,
-                u.created_at,
-                u.username,
-                u.password,
-                u.token,
-                u.status,
-                u.profile_picture
-            FROM messages m
-            JOIN users u ON m.sender_id = u.id
-            LEFT JOIN files f ON m.file_id = f.id
-            WHERE m.id = %s
-        """, (message_id,))
-        msg = self.cursor.fetchone()
-        if msg:
-            return Message(
-                **{
-                    **msg,
-                    'id': msg['message_id'],
-                    'sent': msg['sent'].isoformat(),
-                    'sender': User(
+        try:
+            print(f"Looking for message with ID: {message_id}")
+            self.cursor.execute("""
+                SELECT 
+                    m.id as message_id,
+                    m.sent,
+                    m.text,
+                    m.content,
+                    m.channel_id,
+                    COALESCE(m.reactions::text, '{}') as reactions,
+                    m.has_thread,
+                    m.has_image,
+                    m.thread_id,
+                    m.image,
+                    m.file_id,
+                    f.filename as file_name,
+                    f.content_type as file_content_type,
+                    u.id as user_id,
+                    u.created_at,
+                    u.username,
+                    u.password,
+                    u.token,
+                    u.status,
+                    u.profile_picture
+                FROM messages m
+                JOIN users u ON m.sender_id = u.id
+                LEFT JOIN files f ON m.file_id = f.id
+                WHERE m.id = %s
+            """, (message_id,))
+            
+            msg = self.cursor.fetchone()
+            print(f"Query result: {msg}")
+            
+            if msg:
+                # Parse the reactions JSON string
+                reactions = json.loads(msg['reactions']) if msg['reactions'] else {}
+                print(f"Parsed reactions: {reactions}")
+                
+                return Message(
+                    id=msg['message_id'],
+                    sent=msg['sent'].isoformat(),
+                    text=msg['text'],
+                    content=msg['content'],
+                    channel_id=msg['channel_id'],
+                    reactions=reactions,
+                    has_thread=msg['has_thread'],
+                    has_image=msg['has_image'],
+                    thread_id=msg['thread_id'],
+                    image=msg['image'],
+                    file_id=msg['file_id'],
+                    file_name=msg['file_name'],
+                    file_content_type=msg['file_content_type'],
+                    sender=User(
                         id=msg['user_id'],
                         created_at=msg['created_at'].isoformat(),
                         username=msg['username'],
@@ -340,9 +358,14 @@ class DataLayer:
                         status=msg['status'],
                         profile_picture=msg['profile_picture']
                     )
-                }
-            )
-        return None
+                )
+            print(f"No message found with ID: {message_id}")
+            return None
+        except Exception as e:
+            print(f"Error getting message: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
     
     def get_user_status(self, user_id: str) -> str | None:
         """Get the status of a specific user."""
@@ -563,6 +586,18 @@ class DataLayer:
             import traceback
             traceback.print_exc()
             return []
+
+    def update_message_reactions(self, message_id: str, reactions: Dict[str, int]) -> bool:
+        """Update the reactions for a message"""
+        try:
+            self.cursor.execute(
+                "UPDATE messages SET reactions = %s WHERE id = %s",
+                (json.dumps(reactions), message_id)
+            )
+            return True
+        except Exception as e:
+            print(f"Error updating message reactions: {e}")
+            return False
 
 
 
