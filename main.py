@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Query, File, UploadFile
+from fastapi import FastAPI, HTTPException, Depends, Query, File, UploadFile, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from typing import List, Optional
@@ -15,9 +15,18 @@ from fastapi.responses import FileResponse
 import shutil
 import os
 import hashlib
+from UserPresence import UserPresence
 
 app = FastAPI()
 dl = DataLayer()
+
+@app.on_event("startup")
+async def startup_event():
+    print("Starting UserPresence WebSocket server...")
+    await up.start()
+    print("UserPresence WebSocket server started")
+
+up = UserPresence(port=8887)
 
 
 # Add CORS middleware
@@ -372,6 +381,17 @@ async def get_user(request: GetUserRequest) -> GetUserResponse:
     user = dl.get_user(request.user_id)
     return GetUserResponse(message="User found successfully", ok=True, user=user)
 
+
+class UserStatusRequest(BaseModel):
+    request_user_id: str
+
+class UserStatusResponse(Response):
+    user_status: UserStatus
+
+@app.post("/user_status")
+async def user_status(request: UserStatusRequest) -> UserStatusResponse:
+    user_status = up.get_user_status(request.request_user_id)
+    return UserStatusResponse(message="User status fetched successfully", ok=True, user_status=user_status)
 
 
 if __name__ == "__main__":

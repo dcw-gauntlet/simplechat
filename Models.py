@@ -56,3 +56,7 @@ class Message(BaseModel):
     has_image: bool = False
     thread_id: Optional[str] = None
     image: Optional[str] = None
+
+class Heartbeat(BaseModel):
+    user_id: str
+    channel_id: Optional[str] = None
