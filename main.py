@@ -11,7 +11,7 @@ from typing import Dict
 from DataLayer import DataLayer
 from Models import *
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response as FastAPIResponse
 import shutil
 import os
 import hashlib
@@ -211,6 +211,7 @@ class SendMessageRequest(BaseModel):
     channel_id: str
     user_id: str
     content: str
+    file_id: Optional[str] = None
 
 class SendMessageResponse(Response):
     sent_message: Optional[Message] = None
@@ -228,8 +229,11 @@ async def send_message(request: SendMessageRequest) -> SendMessageResponse:
         reactions: Dict[str, int] = {}  # Default to empty dict
         has_thread: bool = False
         has_image: bool = False
-        thread_id: Optional[Str] = None
+        thread_id: Optional[str] = None
         image: Optional[str] = None
+        file_id: Optional[str] = None
+        file_name: Optional[str] = None
+        file_content_type: Optional[str] = None
     """
     # Get the full user object
     # print(request.dict())
@@ -249,7 +253,10 @@ async def send_message(request: SendMessageRequest) -> SendMessageResponse:
         has_thread=False,
         has_image=False,
         thread_id=None,
-        image=None
+        image=None,
+        file_id=request.file_id,
+        file_name=None,  # Will be populated when we fetch the message
+        file_content_type=None  # Will be populated when we fetch the message
     )
     
     saved_message = dl.send_message(message)
@@ -393,6 +400,94 @@ async def user_status(request: UserStatusRequest) -> UserStatusResponse:
     user_status = up.get_user_status(request.request_user_id)
     return UserStatusResponse(message="User status fetched successfully", ok=True, user_status=user_status)
 
+class FileUploadResponse(Response):
+    file_id: str
+
+@app.post("/upload_file")
+async def upload_file(
+    file: UploadFile = File(...),
+) -> FileUploadResponse:
+    """
+    Upload a file and get a file ID back.
+    The file ID can then be used in a message to reference this file.
+    """
+    try:
+        file_id = str(uuid.uuid4())
+        file_content = await file.read()
+        
+        success = dl.save_file(
+            file_id=file_id,
+            filename=file.filename,
+            content_type=file.content_type,
+            data=file_content
+        )
+        
+        if not success:
+            return FileUploadResponse(message="Failed to save file", ok=False, file_id=None)
+            
+        return FileUploadResponse(
+            message="File uploaded successfully",
+            ok=True,
+            file_id=file_id
+        )
+        
+    except Exception as e:
+        return FileUploadResponse(
+            message=f"Error uploading file: {str(e)}",
+            ok=False,
+            file_id=None
+        )
+
+@app.get("/download_file/{file_id}")
+async def download_file(file_id: str):
+    """
+    Download a file by its ID.
+    """
+    file_data = dl.get_file(file_id)
+    if not file_data:
+        raise HTTPException(status_code=404, detail="File not found")
+        
+    return FastAPIResponse(
+        content=file_data['data'],
+        media_type=file_data['content_type'],
+        headers={
+            'Content-Disposition': f'attachment; filename="{file_data["filename"]}"'
+        }
+    )
+
+class SearchRequest(BaseModel):
+    search_query: str
+
+class SearchResult(BaseModel):
+    channel_id: str
+    channel_name: str
+    message: Message
+    previous_message: Optional[Message] = None
+    next_message: Optional[Message] = None
+    score: float
+
+class SearchResponse(Response):
+    results: List[SearchResult]
+
+@app.post("/search")
+async def search(request: SearchRequest) -> SearchResponse:
+    """
+    Search for messages containing the search query.
+    Returns messages with context (previous and next messages) and relevance score.
+    """
+    try:
+        search_results = dl.search_messages(request.search_query)
+        return SearchResponse(
+            message="Search completed successfully",
+            ok=True,
+            results=[SearchResult(**result) for result in search_results]
+        )
+    except Exception as e:
+        return SearchResponse(
+            message=f"Search failed: {str(e)}",
+            ok=False,
+            results=[]
+        )
 
 if __name__ == "__main__":
     import uvicorn

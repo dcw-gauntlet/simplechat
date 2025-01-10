@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from enum import Enum
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from datetime import datetime
 import uuid
 
@@ -56,7 +56,21 @@ class Message(BaseModel):
     has_image: bool = False
     thread_id: Optional[str] = None
     image: Optional[str] = None
+    file_id: Optional[str] = None
+    file_name: Optional[str] = None
+    file_content_type: Optional[str] = None
 
 class Heartbeat(BaseModel):
     user_id: str
     channel_id: Optional[str] = None
+
+class SearchRequest(BaseModel):
+    search_query: str
+
+class SearchResult(BaseModel):
+    channel_id: str
+    channel_name: str
+    message: Message
+    previous_message: Optional[Message] = None
+    next_message: Optional[Message] = None
+    score: float

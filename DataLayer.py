@@ -4,6 +4,7 @@ from Models import *
 import json
 import uuid
 from datetime import datetime
+from typing import List
 
 """
 CREATE TABLE users (
@@ -44,6 +45,15 @@ CREATE TABLE messages (
     has_image BOOLEAN DEFAULT FALSE,
     thread_id VARCHAR(36),
     image TEXT
+);
+
+CREATE TABLE files (
+    id VARCHAR(36) PRIMARY KEY,
+    created_at TIMESTAMP,
+    filename VARCHAR(255),
+    content_type VARCHAR(255),
+    data BYTEA,
+    size INTEGER
 );
 """
 
@@ -189,6 +199,9 @@ class DataLayer:
                 m.has_image,
                 m.thread_id,
                 m.image,
+                m.file_id,
+                f.filename as file_name,
+                f.content_type as file_content_type,
                 u.id as user_id,
                 u.created_at,
                 u.username,
@@ -198,6 +211,7 @@ class DataLayer:
                 u.profile_picture
             FROM messages m
             JOIN users u ON m.sender_id = u.id
+            LEFT JOIN files f ON m.file_id = f.id
             WHERE m.channel_id = %s
             ORDER BY m.sent ASC
         """, (channel_id,))
@@ -295,6 +309,9 @@ class DataLayer:
                 m.has_image,
                 m.thread_id,
                 m.image,
+                m.file_id,
+                f.filename as file_name,
+                f.content_type as file_content_type,
                 u.id as user_id,
                 u.created_at,
                 u.username,
@@ -304,6 +321,7 @@ class DataLayer:
                 u.profile_picture
             FROM messages m
             JOIN users u ON m.sender_id = u.id
+            LEFT JOIN files f ON m.file_id = f.id
             WHERE m.id = %s
         """, (message_id,))
         msg = self.cursor.fetchone()
@@ -311,10 +329,10 @@ class DataLayer:
             return Message(
                 **{
                     **msg,
-                    'id': msg['message_id'],  # Use the aliased message_id
+                    'id': msg['message_id'],
                     'sent': msg['sent'].isoformat(),
                     'sender': User(
-                        id=msg['user_id'],    # Use the aliased user_id
+                        id=msg['user_id'],
                         created_at=msg['created_at'].isoformat(),
                         username=msg['username'],
                         password=msg['password'],
@@ -360,7 +378,10 @@ class DataLayer:
         thread_id = message.thread_id if message.has_thread else None
         try:
             self.cursor.execute(
-                "INSERT INTO messages (id, sent, text, content, channel_id, sender_id, reactions, has_thread, has_image, thread_id, image) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                """INSERT INTO messages 
+                    (id, sent, text, content, channel_id, sender_id, reactions, 
+                     has_thread, has_image, thread_id, image, file_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (
                     message.id,
                     message.sent,
@@ -372,7 +393,8 @@ class DataLayer:
                     message.has_thread,
                     message.has_image,
                     thread_id,
-                    message.image
+                    message.image,
+                    message.file_id
                 )
             )
             return self.get_message(message.id)  # Return the full message with sender info
@@ -397,6 +419,150 @@ class DataLayer:
             members_count=channel['members_count'],
             creator_id=channel['creator_id']
         ) for channel in channel_data]
+
+    def save_file(self, file_id: str, filename: str, content_type: str, data: bytes) -> bool:
+        try:
+            self.cursor.execute(
+                "INSERT INTO files (id, created_at, filename, content_type, data, size) VALUES (%s, %s, %s, %s, %s, %s)",
+                (file_id, datetime.now(), filename, content_type, data, len(data))
+            )
+            return True
+        except Exception as e:
+            print(f"Error saving file: {e}")
+            return False
+
+    def get_file(self, file_id: str) -> dict | None:
+        try:
+            self.cursor.execute(
+                "SELECT * FROM files WHERE id = %s",
+                (file_id,)
+            )
+            file_data = self.cursor.fetchone()
+            if file_data:
+                return {
+                    'id': file_data['id'],
+                    'filename': file_data['filename'],
+                    'content_type': file_data['content_type'],
+                    'data': file_data['data'],
+                    'size': file_data['size']
+                }
+            return None
+        except Exception as e:
+            print(f"Error getting file: {e}")
+            return None
+
+    def search_messages(self, search_query: str) -> List[dict]:
+        """
+        Search for messages containing the search query using separate queries for clarity.
+        """
+        try:
+            print(f"Searching for: '{search_query}'")
+            
+            # Query 1: Find matching messages
+            self.cursor.execute("""
+                SELECT 
+                    m.id as message_id,
+                    m.sent,
+                    m.text,
+                    m.content,
+                    m.channel_id,
+                    m.reactions,
+                    m.has_thread,
+                    m.has_image,
+                    m.thread_id,
+                    m.image,
+                    m.file_id,
+                    f.filename as file_name,
+                    f.content_type as file_content_type,
+                    c.name as channel_name,
+                    u.id as user_id,
+                    u.created_at as user_created_at,
+                    u.username,
+                    u.password,
+                    u.token,
+                    u.status,
+                    u.profile_picture
+                FROM messages m
+                JOIN channels c ON m.channel_id = c.id
+                JOIN users u ON m.sender_id = u.id
+                LEFT JOIN files f ON m.file_id = f.id
+                WHERE m.content ILIKE %s OR m.text ILIKE %s
+                ORDER BY m.sent DESC
+            """, (f"%{search_query}%", f"%{search_query}%"))
+            
+            results = self.cursor.fetchall()
+            print(f"Found {len(results)} matching messages")
+            
+            search_results = []
+            for result in results:
+                print(f"Processing message: {result['content']}")
+                
+                # Query 2: Find previous message in the same channel
+                self.cursor.execute("""
+                    SELECT * FROM messages 
+                    WHERE channel_id = %s 
+                    AND sent < %s 
+                    ORDER BY sent DESC 
+                    LIMIT 1
+                """, (result['channel_id'], result['sent']))
+                prev_msg = self.cursor.fetchone()
+                
+                # Query 3: Find next message in the same channel
+                self.cursor.execute("""
+                    SELECT * FROM messages 
+                    WHERE channel_id = %s 
+                    AND sent > %s 
+                    ORDER BY sent ASC 
+                    LIMIT 1
+                """, (result['channel_id'], result['sent']))
+                next_msg = self.cursor.fetchone()
+                
+                # Get full message objects for previous and next messages
+                prev_message = self.get_message(prev_msg['id']) if prev_msg else None
+                next_message = self.get_message(next_msg['id']) if next_msg else None
+                
+                # Construct current message
+                current_message = {
+                    'id': result['message_id'],
+                    'sent': result['sent'].isoformat(),
+                    'text': result['text'],
+                    'content': result['content'],
+                    'channel_id': result['channel_id'],
+                    'reactions': result['reactions'],
+                    'has_thread': result['has_thread'],
+                    'has_image': result['has_image'],
+                    'thread_id': result['thread_id'],
+                    'image': result['image'],
+                    'file_id': result['file_id'],
+                    'file_name': result['file_name'],
+                    'file_content_type': result['file_content_type'],
+                    'sender': {
+                        'id': result['user_id'],
+                        'created_at': result['user_created_at'].isoformat(),
+                        'username': result['username'],
+                        'password': result['password'],
+                        'token': result['token'],
+                        'status': result['status'],
+                        'profile_picture': result['profile_picture']
+                    }
+                }
+                
+                search_results.append({
+                    'channel_id': result['channel_id'],
+                    'channel_name': result['channel_name'],
+                    'message': current_message,
+                    'previous_message': prev_message.dict() if prev_message else None,
+                    'next_message': next_message.dict() if next_message else None,
+                    'score': 1.0  # Simple score for now
+                })
+            
+            return search_results
+            
+        except Exception as e:
+            print(f"Error searching messages: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
 
 
 
