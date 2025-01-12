@@ -127,12 +127,11 @@ async def create_channel(request: CreateChannelRequest) -> ChannelResponse:
         dm_string = f"{user_ids[0]}_{user_ids[1]}"
         # Create UUID-like hash (32 chars)
         channel_id = hashlib.md5(dm_string.encode()).hexdigest()[:32]
-        
-        # Use recipient's username or a generated name
-        dm_name = f"DM_{request.recipient_id}"  # You might want to use username instead
+
     else:
         channel_id = str(uuid.uuid4())
-        dm_name = request.name
+        
+    dm_name = request.name
 
     # if channel already exists, return the existing channel
     existing_channel = dl.get_channel_by_id(channel_id)
