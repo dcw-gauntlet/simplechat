@@ -5,6 +5,7 @@ import threading
 import time
 import uuid
 from typing import List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class LoadTestUser:
     def __init__(self, username: str, base_url: str = "http://localhost:8080"):
@@ -78,26 +79,51 @@ def message_sender(user: LoadTestUser, stop_event: threading.Event):
         except Exception as e:
             print(f"Error sending message for {user.username}: {e}")
 
+def create_user(username: str) -> LoadTestUser:
+    """Thread worker function to create a single user"""
+    try:
+        user = LoadTestUser(username)
+        user.register()
+        print(f"Created user {username}")
+        return user
+    except Exception as e:
+        print(f"Failed to create user {username}: {e}")
+        return None
+
 def main():
     parser = argparse.ArgumentParser(description='Run load test with N users')
     parser.add_argument('n', type=int, help='Number of users to create')
+    parser.add_argument('--threads', type=int, default=3, help='Number of threads to use for user creation')
     args = parser.parse_args()
 
     # Generate a test run ID
     test_run_id = str(uuid.uuid4())[:8]
     print(f"Starting load test {test_run_id} with {args.n} users")
 
-    # Create users
+    # Create users in parallel
     users: List[LoadTestUser] = []
-    for i in range(args.n):
-        username = f"loadtest_{test_run_id}_{i+1}"
-        user = LoadTestUser(username)
-        try:
-            user.register()
-            users.append(user)
-            print(f"Created user {username}")
-        except Exception as e:
-            print(f"Failed to create user {username}: {e}")
+    usernames = [f"loadtest_{test_run_id}_{i+1}" for i in range(args.n)]
+    
+    print(f"Creating {args.n} users using {args.threads} threads...")
+    start_time = time.time()
+    
+    with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        # Submit all user creation tasks
+        future_to_username = {executor.submit(create_user, username): username 
+                            for username in usernames}
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_username):
+            username = future_to_username[future]
+            try:
+                user = future.result()
+                if user:
+                    users.append(user)
+            except Exception as e:
+                print(f"Error creating user {username}: {e}")
+
+    end_time = time.time()
+    print(f"Created {len(users)} users in {end_time - start_time:.2f} seconds")
 
     if not users:
         print("No users were created successfully. Exiting.")
@@ -118,6 +144,7 @@ def main():
         raise Exception(f"Failed to create channel: {response.text}")
 
     # Have all users join the channel
+    print("Having users join the channel...")
     for user in users:
         try:
             user.join_channel(channel_name)

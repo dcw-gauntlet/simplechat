@@ -41,7 +41,7 @@ class UserPresence:
             "0.0.0.0",  # Listen on all interfaces
             self.port,
             # Add CORS headers
-            origins=["http://localhost:3000", "http://venus:3000"]  # Add your development origins
+            origins=["http://localhost:3000", "http://venus:3000", "http://13.58.73.251:3000", "*"]  # Add your development origins
         )
         print(f"WebSocket server is now running on port {self.port}")
         # No need to run_forever() as this will be run by the calling context
