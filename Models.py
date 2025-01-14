@@ -74,3 +74,12 @@ class SearchResult(BaseModel):
     previous_message: Optional[Message] = None
     next_message: Optional[Message] = None
     score: float
+    
+
+class FileDescription(BaseModel):
+    id: str
+    filename: str
+    content_type: str
+    size: int
+    created_at: str
+    channel_id: str

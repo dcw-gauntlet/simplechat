@@ -130,7 +130,7 @@ async def create_channel(request: CreateChannelRequest) -> ChannelResponse:
 
     else:
         channel_id = str(uuid.uuid4())
-        
+
     dm_name = request.name
 
     # if channel already exists, return the existing channel
@@ -157,31 +157,21 @@ class JoinChannelResponse(Response):
 
 @app.post("/join_channel")
 async def join_channel(request: JoinChannelRequest) -> JoinChannelResponse:
+    # Get the channel
     user = dl.get_user_by_username(request.username)
-    channel = dl.get_channel_by_name(request.channel_name)
-
-    if channel is None:
-        return JoinChannelResponse(message="Channel not found", ok=False, channel_membership=None)
-
-    if user is None:
+    if not user:
         return JoinChannelResponse(message="User not found", ok=False, channel_membership=None)
 
-    # check if user is already in the channel
-    current_members = dl.get_users_in_channel(channel.id)
-    if any(member.id == user.id for member in current_members):
-        return JoinChannelResponse(message="User already in the channel", ok=False, channel_membership=None)
+    channel = dl.get_channel_by_name(request.channel_name)
+    if not channel:
+        return JoinChannelResponse(message="Channel not found", ok=False, channel_membership=None)
 
-    # Create the membership
+    # Create membership
     membership = dl.join_channel(user.id, channel.id)
+    if not membership:
+        raise HTTPException(status_code=500, detail="Failed to join channel")
 
-    # Update the channel's member count
-    channel.members_count += 1
-    dl.cursor.execute(
-        "UPDATE channels SET members_count = %s WHERE id = %s",
-        (channel.members_count, channel.id)
-    )
-
-    return JoinChannelResponse(message="User joined channel successfully", ok=True, channel_membership=membership)
+    return Response(message="Successfully joined channel", ok=True)
 
 class MyChannelsRequest(BaseModel):
     user_id: str
@@ -368,10 +358,7 @@ async def add_thread(request: AddThreadRequest) -> Response:
     
     # Update member count
     channel.members_count += 1
-    dl.cursor.execute(
-        "UPDATE channels SET members_count = %s WHERE id = %s",
-        (channel.members_count, channel.id)
-    )
+    dl.update_channel_members_count(channel.id, channel.members_count)
 
     dl.add_thread(message)
 
@@ -409,12 +396,18 @@ async def user_status(request: UserStatusRequest) -> UserStatusResponse:
     user_status = up.get_user_status(request.request_user_id)
     return UserStatusResponse(message="User status fetched successfully", ok=True, user_status=user_status)
 
+
+class FileUploadRequest(BaseModel):
+    file: UploadFile
+    associated_channel: str
+
 class FileUploadResponse(Response):
     file_id: str
 
+
 @app.post("/upload_file")
 async def upload_file(
-    file: UploadFile = File(...),
+    request: FileUploadRequest
 ) -> FileUploadResponse:
     """
     Upload a file and get a file ID back.
@@ -422,13 +415,14 @@ async def upload_file(
     """
     try:
         file_id = str(uuid.uuid4())
-        file_content = await file.read()
+        file_content = await request.file.read()
         
         success = dl.save_file(
             file_id=file_id,
-            filename=file.filename,
-            content_type=file.content_type,
-            data=file_content
+            filename=request.file.filename,
+            content_type=request.file.content_type,
+            data=file_content,
+            associated_channel=request.associated_channel
         )
         
         if not success:
@@ -446,6 +440,18 @@ async def upload_file(
             ok=False,
             file_id=None
         )
+
+
+class AssociatedFilesRequest(BaseModel):
+    channel_id: str
+
+class AssociatedFilesResponse(Response):
+    files: List[FileDescription]
+
+@app.post("/associated_files")
+async def associated_files(request: AssociatedFilesRequest) -> AssociatedFilesResponse:
+    files = dl.get_associated_files(request.channel_id)
+    return AssociatedFilesResponse(message="Files fetched successfully", ok=True, files=files)
 
 @app.get("/download_file/{file_id}")
 async def download_file(file_id: str):
