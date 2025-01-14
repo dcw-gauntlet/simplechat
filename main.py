@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Query, File, UploadFile, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, Query, File, UploadFile, BackgroundTasks, Form
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from typing import List, Optional
@@ -16,9 +16,19 @@ import shutil
 import os
 import hashlib
 from UserPresence import UserPresence
+import tempfile
+import pdfplumber
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.schema import Document
+from langchain.docstore.document import Document
+from langchain_openai import OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
 
 app = FastAPI()
 dl = DataLayer()
+
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+llm = ChatOpenAI(model="gpt-4o-mini")
 
 @app.on_event("startup")
 async def startup_event():
@@ -407,7 +417,8 @@ class FileUploadResponse(Response):
 
 @app.post("/upload_file")
 async def upload_file(
-    request: FileUploadRequest
+    file: UploadFile = File(...),  # Changed to accept file directly
+    associated_channel: str = Form(...)  # Use Form for text data
 ) -> FileUploadResponse:
     """
     Upload a file and get a file ID back.
@@ -415,14 +426,14 @@ async def upload_file(
     """
     try:
         file_id = str(uuid.uuid4())
-        file_content = await request.file.read()
+        file_content = await file.read()  # Read binary content directly
         
         success = dl.save_file(
             file_id=file_id,
-            filename=request.file.filename,
-            content_type=request.file.content_type,
-            data=file_content,
-            associated_channel=request.associated_channel
+            filename=file.filename,
+            content_type=file.content_type,
+            data=file_content,  # Pass binary data directly
+            associated_channel=associated_channel
         )
         
         if not success:
@@ -503,6 +514,133 @@ async def search(request: SearchRequest) -> SearchResponse:
             ok=False,
             results=[]
         )
+
+
+class RAGIngestRequest(BaseModel):
+    file_id: str
+
+@app.post("/rag_ingest")
+async def rag_ingest(request: RAGIngestRequest) -> Response:
+    try:
+        # Get the file from storage
+        file = dl.get_file(request.file_id)
+        if not file:
+            return Response(message="File not found", ok=False)
+
+        # Check file type
+        content_type = file['content_type'].lower()
+        file_extension = os.path.splitext(file['filename'])[1].lower()
+
+        # Validate file type
+        allowed_types = {
+            'application/pdf': '.pdf',
+            'text/plain': '.txt',
+            'text/markdown': '.md'
+        }
+        
+        if content_type not in allowed_types and file_extension not in ['.pdf', '.txt', '.md']:
+            return Response(message="Unsupported file type. Only PDF, TXT, and MD files are supported.", ok=False)
+
+        # Extract text based on file type
+        documents = []
+        
+        if content_type == 'application/pdf' or file_extension == '.pdf':
+            # Handle PDF
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
+                temp_file.write(file['data'])
+                temp_filename = temp_file.name
+
+            with pdfplumber.open(temp_filename) as pdf:
+                for i, page in enumerate(pdf.pages):
+                    text = page.extract_text()
+                    if text:
+                        documents.append(Document(
+                            page_content=text,
+                            metadata={"page": i + 1}
+                        ))
+            os.unlink(temp_filename)
+            
+        else:
+            # Handle TXT and MD
+            text = file['data'].decode('utf-8')
+            documents.append(Document(
+                page_content=text,
+                metadata={"page": 1}
+            ))
+
+        # Chunk the documents
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=4_000, chunk_overlap=500)
+        text_chunks = text_splitter.split_documents(documents)
+
+        # Create embeddings
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        chunks = [
+            Chunk(
+                embedding=embeddings.embed_query(chunk.page_content), 
+                file_id=request.file_id, 
+                file_chunk=i,
+                text=chunk.page_content
+            ) for i, chunk in enumerate(text_chunks)
+        ]
+
+        # Store chunks in database
+        success = dl.add_chunks(chunks)
+        
+        if not success:
+            return Response(message="Failed to store chunks", ok=False)
+
+        return Response(message=f"Successfully processed {len(chunks)} chunks", ok=True)
+
+    except Exception as e:
+        print(f"Error in RAG ingest: {e}")
+        return Response(message=f"Error processing file: {str(e)}", ok=False)
+
+
+class RAGSearchRequest(BaseModel):
+    query: str
+
+class RAGSearchResponse(Response):
+    result: str
+
+@app.post("/rag_search")
+async def rag_search(request: RAGSearchRequest) -> RAGSearchResponse:
+    try:
+        # Get embedding for the query
+        query_vector = embeddings.embed_query(request.query)
+        
+        # Get similar chunks from the database
+        chunks = dl.similarity_search(query_vector, top_k=3)
+        
+        if not chunks:
+            return RAGSearchResponse(
+                message="No relevant content found",
+                ok=True,
+                result="I couldn't find any relevant information to answer your question."
+            )
+        
+        # Format the chunks into a string for the LLM
+        rag_string_parts = [f"# Result {n}\n{chunk.text}" for n, chunk in enumerate(chunks[:3])]
+        rag_string = "Search results from documents:\n" + "\n".join(rag_string_parts)
+        
+        # Create the prompt with instructions
+        prefix_instruction = f"User asks: {request.query}\n"
+        
+        # Get response from LLM
+        response = llm.invoke(f"{prefix_instruction}{rag_string}\n# Instructions: Use the search results to answer the user's query.")
+        
+        return RAGSearchResponse(
+            message="Search completed successfully",
+            ok=True,
+            result=response.content
+        )
+        
+    except Exception as e:
+        return RAGSearchResponse(
+            message=f"Error during RAG search: {str(e)}",
+            ok=False,
+            result=None
+        )
+
 
 if __name__ == "__main__":
     import uvicorn

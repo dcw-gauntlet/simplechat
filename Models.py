@@ -83,3 +83,10 @@ class FileDescription(BaseModel):
     size: int
     created_at: str
     channel_id: str
+
+class Chunk(BaseModel):
+    id: Optional[int] = None
+    embedding: List[float]
+    file_id: str
+    file_chunk: int
+    text: str

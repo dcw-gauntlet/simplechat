@@ -8,7 +8,7 @@ from typing import List, Dict
 from dotenv import load_dotenv
 import os
 from psycopg_pool import ConnectionPool
-
+from pgvector.psycopg import register_vector
 
 load_dotenv()
 
@@ -16,6 +16,7 @@ DB_HOST = os.getenv("DB_HOST")
 DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
+
 
 """
 CREATE TABLE users (
@@ -73,8 +74,6 @@ class DataLayer:
         """Establish a connection to the database and print a message"""
         self.conn_string = f"host={DB_HOST} dbname={DB_NAME} user={DB_USER} password={DB_PASSWORD}"
 
-        
-
         try:
             self.pool = ConnectionPool(
                 self.conn_string, 
@@ -85,6 +84,7 @@ class DataLayer:
             )
             
             with self.pool.connection() as conn:
+                register_vector(conn)  # Register vector type for this connection
                 cursor = conn.cursor()
                 cursor.execute("SELECT count(*) FROM users")
                 count = cursor.fetchone()['count']
@@ -550,7 +550,14 @@ class DataLayer:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM files WHERE associated_channel = %s", (channel_id,))
             file_data = cursor.fetchall()
-            return [FileDescription(**file) for file in file_data]
+            return [FileDescription(
+                id=file['id'],
+                filename=file['filename'],
+                content_type=file['content_type'],
+                size=file['size'],
+                created_at=file['created_at'].isoformat(),  # Convert datetime to string
+                channel_id=file['associated_channel']  # Map associated_channel to channel_id
+            ) for file in file_data]
         
 
     def get_file(self, file_id: str) -> dict | None:
@@ -701,3 +708,72 @@ class DataLayer:
             return True
 
 
+
+    """
+    CREATE TABLE IF NOT EXISTS public.chunks
+    (
+        id integer NOT NULL DEFAULT nextval('chunks_id_seq'::regclass),
+        embedding vector(1536),
+        file_id character varying(36) COLLATE pg_catalog."default" NOT NULL,
+        file_chunk integer NOT NULL,
+        CONSTRAINT chunks_pkey PRIMARY KEY (id),
+        CONSTRAINT unique_file_chunk UNIQUE (file_id, file_chunk),
+        CONSTRAINT fk_file FOREIGN KEY (file_id)
+            REFERENCES public.files (id) MATCH SIMPLE
+            ON UPDATE NO ACTION
+            ON DELETE CASCADE
+    )
+    """
+    def add_chunks(self, chunks: List[Chunk]):
+        try:
+            with self.pool.connection() as conn:
+                with conn.cursor() as cur:
+                    # Convert chunks to list of tuples and format vector as string
+                    chunk_data = [
+                        (f'[{",".join(map(str, chunk.embedding))}]', chunk.file_id, chunk.file_chunk, chunk.text) 
+                        for chunk in chunks
+                    ]
+                    
+                    # Insert all chunks in one operation
+                    cur.executemany(
+                        "INSERT INTO chunks (embedding, file_id, file_chunk, text) VALUES (%s::vector, %s, %s, %s)",
+                        chunk_data
+                    )
+                    conn.commit()
+            return True
+        except Exception as e:
+            print(f"Error adding chunks: {e}")
+            return False
+
+    def similarity_search(self, query_vector: List[float], top_k: int = 10) -> List[Chunk]:
+        try:
+            with self.pool.connection() as conn:
+                with conn.cursor() as cur:
+                    vector_str = f'[{",".join(map(str, query_vector))}]'
+                    cur.execute("""
+                        SELECT 
+                            c.id,
+                            c.embedding::text,  -- Convert to text for proper parsing
+                            c.file_id,
+                            c.file_chunk,
+                            c.text,
+                            f.filename,
+                            f.content_type
+                        FROM chunks c
+                        JOIN files f ON c.file_id = f.id
+                        ORDER BY c.embedding <=> %s::vector
+                        LIMIT %s
+                    """, (vector_str, top_k))
+                    chunks = cur.fetchall()
+                    
+                    # Convert database results to Chunk objects
+                    return [Chunk(
+                        id=chunk['id'],
+                        embedding=list(map(float, chunk['embedding'].strip('[]').split(','))),  # Properly parse the vector string
+                        file_id=chunk['file_id'],
+                        file_chunk=chunk['file_chunk'],
+                        text=chunk['text']
+                    ) for chunk in chunks]
+        except Exception as e:
+            print(f"Error in similarity search: {e}")
+            return []

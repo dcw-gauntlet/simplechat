@@ -8,4 +8,11 @@ pytest
 httpx
 websockets
 psycopg
-python-dotenv
+python-
+langchain-text-splitters 
+langchain-community 
+langgraph
+langchain-openai
+psycopg-binary
+pgvector
+pdfplumber
