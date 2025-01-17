@@ -24,7 +24,7 @@ from langchain.docstore.document import Document
 from langchain_openai import OpenAIEmbeddings
 from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
-from Agent import Agent, Tools
+from Agent import Agent
 
 load_dotenv()  # This should be at the start of the file
 
@@ -46,12 +46,8 @@ llm = ChatOpenAI(
     model="gpt-4-turbo-preview"  # Updated to the correct model name
 )
 
-tools = Tools(dl)
-agent = Agent(  
-    'google-gla:gemini-2.0-flash-exp',
-    system_prompt='You are an AI agent that helps to manage worker chat details.',
-    tools=tools.tools
-)
+
+agent = Agent(dl)
 
 @app.on_event("startup")
 async def startup_event():
@@ -311,8 +307,6 @@ async def add_reaction(request: ReactionRequest) -> Response:
     if not message:
         print(f"Message {request.message_id} not found")
         raise HTTPException(status_code=404, detail="Message not found")
-    
-    print(f"Found message: {message.dict()}")
     
     # Initialize reactions dict if it doesn't exist
     if not hasattr(message, 'reactions'):
@@ -742,16 +736,14 @@ async def conversation_response(message, n_previous_messages=25):
     
     # Create context-aware prompt
     context_prompt = f"""You are an AI agent that helps to manage worker chat details.
+    # Recent conversation:
+    {conversation_history}
+    # Current message:
+    {message.content}
+    """
 
-Recent conversation:
-{conversation_history}
-
-Current message:
-{message.content}"""
-
-    # Run agent with updated prompt
-    result = await agent.run(context_prompt)
-    print("Agent response: ", result)
+    # Run agent without await since it's not async
+    result = agent.run(context_prompt)
 
     # Send response
     ai_user = dl.get_user('1')
@@ -759,7 +751,7 @@ Current message:
         send_message_request = SendMessageRequest(
             channel_id=message.channel_id,
             user_id=ai_user.id,
-            content=str(result.data)
+            content=str(result["messages"][-1].content)
         )
         await send_message(send_message_request, BackgroundTasks())
 

@@ -861,48 +861,134 @@ class DataLayer:
 
     def get_recent_messages(self, hours: int = 24) -> list[Message]:
         """Get all messages from the past specified hours."""
-        with self.pool.connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT 
-                    m.id as message_id,
-                    m.sent,
-                    m.text,
-                    m.content,
-                    m.channel_id,
-                    m.reactions,
-                    m.has_thread,
-                    m.has_image,
-                    m.thread_id,
-                    m.image,
-                    m.file_id,
-                    u.id as user_id,
-                    u.created_at,
-                    u.username,
-                    u.password,
-                    u.token,
-                    u.status,
-                    u.profile_picture
-                FROM messages m
-                JOIN users u ON m.sender_id = u.id
-                WHERE m.sent > NOW() - INTERVAL '%s hours'
-                ORDER BY m.sent ASC
-            """, (hours,))
-            
-            message_data = cursor.fetchall()
-            return [Message(
-                **{
-                    **msg,
-                    'id': msg['message_id'],
-                    'sent': msg['sent'].isoformat(),
-                    'sender': User(
-                        id=msg['user_id'],
-                        created_at=msg['created_at'].isoformat(),
-                        username=msg['username'],
-                        password=msg['password'],
-                        token=msg['token'],
-                        status=msg['status'],
-                        profile_picture=msg['profile_picture']
-                    )
-                }
-            ) for msg in message_data]
+        try:
+            with self.pool.connection() as conn:
+                cursor = conn.cursor()
+                
+                query = f"""
+                    SELECT 
+                        m.id as message_id,
+                        m.sent,
+                        m.text,
+                        m.content,
+                        m.channel_id,
+                        m.reactions,
+                        m.has_thread,
+                        m.has_image,
+                        m.thread_id,
+                        m.image,
+                        m.file_id,
+                        u.id as user_id,
+                        u.created_at,
+                        u.username,
+                        u.password,
+                        u.token,
+                        u.status,
+                        u.profile_picture
+                    FROM messages m
+                    JOIN users u ON m.sender_id = u.id
+                    WHERE m.sent > NOW() - INTERVAL '{hours} hours'
+                    ORDER BY m.sent ASC
+                """
+                
+                cursor.execute(query)
+                message_data = cursor.fetchall()
+                print(f"Query executed. Found {len(message_data)} messages")
+                
+                messages = [Message(
+                    **{
+                        **msg,
+                        'id': msg['message_id'],
+                        'sent': msg['sent'].isoformat(),
+                        'sender': User(
+                            id=msg['user_id'],
+                            created_at=msg['created_at'].isoformat(),
+                            username=msg['username'],
+                            password=msg['password'],
+                            token=msg['token'],
+                            status=msg['status'],
+                            profile_picture=msg['profile_picture']
+                        )
+                    }
+                ) for msg in message_data]
+                
+                return messages
+                
+        except Exception as e:
+            print(f"Error in get_recent_messages: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+
+    def get_messages_for_users(self, user_ids: List[str], start_time: datetime = None, end_time: datetime = None) -> list[Message]:
+        """Get all messages from specified users within an optional time frame.
+        
+        Args:
+            user_ids: List of user IDs to get messages for
+            start_time: Optional start time to filter messages (inclusive)
+            end_time: Optional end time to filter messages (inclusive)
+        """
+        try:
+            with self.pool.connection() as conn:
+                cursor = conn.cursor()
+                
+                # Build the query dynamically based on provided parameters
+                query = """
+                    SELECT 
+                        m.id as message_id,
+                        m.sent,
+                        m.text,
+                        m.content,
+                        m.channel_id,
+                        m.reactions,
+                        m.has_thread,
+                        m.has_image,
+                        m.thread_id,
+                        m.image,
+                        m.file_id,
+                        u.id as user_id,
+                        u.created_at,
+                        u.username,
+                        u.password,
+                        u.token,
+                        u.status,
+                        u.profile_picture
+                    FROM messages m
+                    JOIN users u ON m.sender_id = u.id
+                    WHERE u.username = ANY(%s)
+                """
+                params = [user_ids]
+                
+                # Add time constraints if provided
+                if start_time:
+                    query += " AND m.sent >= %s"
+                    params.append(start_time)
+                if end_time:
+                    query += " AND m.sent <= %s"
+                    params.append(end_time)
+                
+                query += " ORDER BY m.sent ASC"
+                
+                cursor.execute(query, params)
+                message_data = cursor.fetchall()
+                
+                return [Message(
+                    **{
+                        **msg,
+                        'id': msg['message_id'],
+                        'sent': msg['sent'].isoformat(),
+                        'sender': User(
+                            id=msg['user_id'],
+                            created_at=msg['created_at'].isoformat(),
+                            username=msg['username'],
+                            password=msg['password'],
+                            token=msg['token'],
+                            status=msg['status'],
+                            profile_picture=msg['profile_picture']
+                        )
+                    }
+                ) for msg in message_data]
+                
+        except Exception as e:
+            print(f"Error getting messages for users: {e}")
+            return []
