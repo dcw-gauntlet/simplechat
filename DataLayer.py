@@ -3,14 +3,14 @@ from psycopg.rows import dict_row
 from Models import *
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict
 from dotenv import load_dotenv
 import os
 from psycopg_pool import ConnectionPool
 from pgvector.psycopg import register_vector
 
-load_dotenv()
+# load_dotenv()
 
 DB_HOST = os.getenv("DB_HOST")
 DB_NAME = os.getenv("DB_NAME")
@@ -296,9 +296,47 @@ class DataLayer:
         """Get all messages sent by a specific user."""
         with self.pool.connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM messages WHERE sender_id = %s", (user_id,))
+            cursor.execute("""
+                SELECT 
+                    m.id as message_id,
+                    m.sent,
+                    m.text,
+                    m.content,
+                    m.channel_id,
+                    m.reactions,
+                    m.has_thread,
+                    m.has_image,
+                    m.thread_id,
+                    m.image,
+                    m.file_id,
+                    u.id as user_id,
+                    u.created_at,
+                    u.username,
+                    u.password,
+                    u.token,
+                    u.status,
+                    u.profile_picture
+                FROM messages m
+                JOIN users u ON m.sender_id = u.id
+                WHERE m.sender_id = %s
+            """, (user_id,))
             message_data = cursor.fetchall()
-            return [Message(**{**msg, 'sent': msg['sent'].isoformat()}) for msg in message_data]
+            return [Message(
+                **{
+                    **msg,
+                    'id': msg['message_id'],
+                    'sent': msg['sent'].isoformat(),
+                    'sender': User(
+                        id=msg['user_id'],
+                        created_at=msg['created_at'].isoformat(),
+                        username=msg['username'],
+                        password=msg['password'],
+                        token=msg['token'],
+                        status=msg['status'],
+                        profile_picture=msg['profile_picture']
+                    )
+                }
+            ) for msg in message_data]
 
     def add_channel_membership(self, membership: ChannelMembership):
         try:
@@ -728,15 +766,23 @@ class DataLayer:
         try:
             with self.pool.connection() as conn:
                 with conn.cursor() as cur:
-                    # Convert chunks to list of tuples and format vector as string
                     chunk_data = [
-                        (f'[{",".join(map(str, chunk.embedding))}]', chunk.file_id, chunk.file_chunk, chunk.text) 
+                        (
+                            f'[{",".join(map(str, chunk.embedding))}]',
+                            chunk.file_id,
+                            chunk.file_chunk,
+                            chunk.text,
+                            chunk.channel_id
+                        ) 
                         for chunk in chunks
                     ]
                     
-                    # Insert all chunks in one operation
                     cur.executemany(
-                        "INSERT INTO chunks (embedding, file_id, file_chunk, text) VALUES (%s::vector, %s, %s, %s)",
+                        """
+                        INSERT INTO chunks 
+                        (embedding, file_id, file_chunk, text, channel_id)
+                        VALUES (%s::vector, %s, %s, %s, %s)
+                        """,
                         chunk_data
                     )
                     conn.commit()
@@ -777,3 +823,86 @@ class DataLayer:
         except Exception as e:
             print(f"Error in similarity search: {e}")
             return []
+
+    def similarity_search_in_channel(self, query_vector: List[float], channel_id: str, top_k: int = 10) -> List[Chunk]:
+        try:
+            with self.pool.connection() as conn:
+                with conn.cursor() as cur:
+                    vector_str = f'[{",".join(map(str, query_vector))}]'
+                    cur.execute("""
+                        SELECT 
+                            c.id,
+                            c.embedding::text,
+                            c.file_id,
+                            c.file_chunk,
+                            c.text,
+                            c.channel_id,
+                            f.filename,
+                            f.content_type
+                        FROM chunks c
+                        JOIN files f ON c.file_id = f.id
+                        WHERE c.channel_id = %s
+                        ORDER BY c.embedding <=> %s::vector
+                        LIMIT %s
+                    """, (channel_id, vector_str, top_k))
+                    chunks = cur.fetchall()
+                    
+                    return [Chunk(
+                        id=chunk['id'],
+                        embedding=list(map(float, chunk['embedding'].strip('[]').split(','))),
+                        file_id=chunk['file_id'],
+                        file_chunk=chunk['file_chunk'],
+                        text=chunk['text'],
+                        channel_id=chunk['channel_id']
+                    ) for chunk in chunks]
+        except Exception as e:
+            print(f"Error in channel similarity search: {e}")
+            return []
+
+    def get_recent_messages(self, hours: int = 24) -> list[Message]:
+        """Get all messages from the past specified hours."""
+        with self.pool.connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT 
+                    m.id as message_id,
+                    m.sent,
+                    m.text,
+                    m.content,
+                    m.channel_id,
+                    m.reactions,
+                    m.has_thread,
+                    m.has_image,
+                    m.thread_id,
+                    m.image,
+                    m.file_id,
+                    u.id as user_id,
+                    u.created_at,
+                    u.username,
+                    u.password,
+                    u.token,
+                    u.status,
+                    u.profile_picture
+                FROM messages m
+                JOIN users u ON m.sender_id = u.id
+                WHERE m.sent > NOW() - INTERVAL '%s hours'
+                ORDER BY m.sent ASC
+            """, (hours,))
+            
+            message_data = cursor.fetchall()
+            return [Message(
+                **{
+                    **msg,
+                    'id': msg['message_id'],
+                    'sent': msg['sent'].isoformat(),
+                    'sender': User(
+                        id=msg['user_id'],
+                        created_at=msg['created_at'].isoformat(),
+                        username=msg['username'],
+                        password=msg['password'],
+                        token=msg['token'],
+                        status=msg['status'],
+                        profile_picture=msg['profile_picture']
+                    )
+                }
+            ) for msg in message_data]

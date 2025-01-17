@@ -23,12 +23,35 @@ from langchain.schema import Document
 from langchain.docstore.document import Document
 from langchain_openai import OpenAIEmbeddings
 from langchain_openai import ChatOpenAI
+from dotenv import load_dotenv
+from Agent import Agent, Tools
+
+load_dotenv()  # This should be at the start of the file
 
 app = FastAPI()
 dl = DataLayer()
 
-embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-llm = ChatOpenAI(model="gpt-4o-mini")
+# Get API key from environment variable
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY2")
+print(OPENAI_API_KEY)
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY environment variable is not set")
+
+embeddings = OpenAIEmbeddings(
+    api_key=OPENAI_API_KEY,
+    model="text-embedding-3-small"
+)
+llm = ChatOpenAI(
+    api_key=OPENAI_API_KEY,
+    model="gpt-4-turbo-preview"  # Updated to the correct model name
+)
+
+tools = Tools(dl)
+agent = Agent(  
+    'google-gla:gemini-2.0-flash-exp',
+    system_prompt='You are an AI agent that helps to manage worker chat details.',
+    tools=tools.tools
+)
 
 @app.on_event("startup")
 async def startup_event():
@@ -216,27 +239,8 @@ class SendMessageResponse(Response):
     sent_message: Optional[Message] = None
 
 @app.post("/send_message")
-async def send_message(request: SendMessageRequest) -> SendMessageResponse:
-    """
-    class Message(BaseModel):
-        id: str
-        sent: str
-        text: str
-        sender: User
-        content: str
-        channel_id: str
-        reactions: Dict[str, int] = {}  # Default to empty dict
-        has_thread: bool = False
-        has_image: bool = False
-        thread_id: Optional[str] = None
-        image: Optional[str] = None
-        file_id: Optional[str] = None
-        file_name: Optional[str] = None
-        file_content_type: Optional[str] = None
-    """
+async def send_message(request: SendMessageRequest, background_tasks: BackgroundTasks) -> SendMessageResponse:
     # Get the full user object
-    # print(request.dict())
-
     user = dl.get_user(request.user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -254,11 +258,24 @@ async def send_message(request: SendMessageRequest) -> SendMessageResponse:
         thread_id=None,
         image=None,
         file_id=request.file_id,
-        file_name=None,  # Will be populated when we fetch the message
-        file_content_type=None  # Will be populated when we fetch the message
+        file_name=None,
+        file_content_type=None
     )
     
     saved_message = dl.send_message(message)
+
+    # if the message starts with @ai, add the agent response to background tasks
+    if message.content.startswith("@ai"):
+        background_tasks.add_task(agent_response, message)
+
+    channel = dl.get_channel(message.channel_id)
+    if channel.channel_type == ChannelType.DM:
+        # if the other user is ai, add the agent response to background tasks
+        all_users = dl.get_users_in_channel(message.channel_id)
+        for user in all_users:
+            if user.username == "ai":
+                print("Adding conversation response to background tasks")
+                background_tasks.add_task(conversation_response, message)
 
     return SendMessageResponse(message="Message sent successfully", ok=True, sent_message=saved_message)
 
@@ -518,7 +535,7 @@ async def search(request: SearchRequest) -> SearchResponse:
 
 class RAGIngestRequest(BaseModel):
     file_id: str
-
+    channel_id: Optional[str] = None
 @app.post("/rag_ingest")
 async def rag_ingest(request: RAGIngestRequest) -> Response:
     try:
@@ -573,13 +590,13 @@ async def rag_ingest(request: RAGIngestRequest) -> Response:
         text_chunks = text_splitter.split_documents(documents)
 
         # Create embeddings
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
         chunks = [
             Chunk(
                 embedding=embeddings.embed_query(chunk.page_content), 
                 file_id=request.file_id, 
                 file_chunk=i,
-                text=chunk.page_content
+                text=chunk.page_content,
+                channel_id=request.channel_id
             ) for i, chunk in enumerate(text_chunks)
         ]
 
@@ -598,6 +615,7 @@ async def rag_ingest(request: RAGIngestRequest) -> Response:
 
 class RAGSearchRequest(BaseModel):
     query: str
+    channel_id: Optional[str] = None
 
 class RAGSearchResponse(Response):
     result: str
@@ -608,8 +626,16 @@ async def rag_search(request: RAGSearchRequest) -> RAGSearchResponse:
         # Get embedding for the query
         query_vector = embeddings.embed_query(request.query)
         
-        # Get similar chunks from the database
-        chunks = dl.similarity_search(query_vector, top_k=3)
+        if request.channel_id:
+            # Get similar chunks from the specific channel
+            chunks = dl.similarity_search_in_channel(
+                query_vector, 
+                request.channel_id,
+                top_k=3
+            )
+        else:
+            # Get similar chunks from all channels
+            chunks = dl.similarity_search(query_vector, top_k=3)
         
         if not chunks:
             return RAGSearchResponse(
@@ -628,6 +654,13 @@ async def rag_search(request: RAGSearchRequest) -> RAGSearchResponse:
         # Get response from LLM
         response = llm.invoke(f"{prefix_instruction}{rag_string}\n# Instructions: Use the search results to answer the user's query.")
         
+        if not response or not response.content:
+            return RAGSearchResponse(
+                message="Failed to generate response",
+                ok=False,
+                result="Sorry, I couldn't generate a response at this time."
+            )
+        
         return RAGSearchResponse(
             message="Search completed successfully",
             ok=True,
@@ -635,13 +668,102 @@ async def rag_search(request: RAGSearchRequest) -> RAGSearchResponse:
         )
         
     except Exception as e:
+        print(f"Error during RAG search: {e}")  # Add logging
         return RAGSearchResponse(
             message=f"Error during RAG search: {str(e)}",
             ok=False,
-            result=None
+            result="An error occurred while processing your request."
         )
+
+
+
+async def agent_response(message, n_previous_messages=5):
+    """
+    Given a message, the agent composes a response to it.
+    """
+    ai_user = dl.get_user('1')
+
+    # select previous n messages in the channel
+    channel = dl.get_channel(message.channel_id)
+    messages = dl.get_channel_messages(message.channel_id)
+    previous_messages = messages[-n_previous_messages:]
+
+    recent_history = "# Recent messages\n" + "\n".join([f"{message.sender.username}: {message.content}" for message in previous_messages])
+
+    build_rag_query = f"# Instructions\n Given the recent messages, and the user's specific question, build a query for the RAG search."
+
+    build_rag_query = f"{build_rag_query}\n{recent_history}\n# User's question\n {message.content}"
+
+    rag_query = llm.invoke(build_rag_query).content
+
+    # Create a proper RAGSearchRequest object
+    rag_request = RAGSearchRequest(
+        query=rag_query,
+        channel_id=message.channel_id
+    )
+    
+    rag_search_response = await rag_search(rag_request)  # Pass the request object
+
+    build_response = f"""# Instructions
+    The user has sent a message asking for AI assistance.  You should construct a *high quality* response.
+    Answer what the user asked, and think deeper - answer also what they should have asked or likely meant to ask.
+    Be concise - 1-3 sentences.
+    If you don't know, or don't have enough information, say so.  That's okay.
+    # RAG search results
+    {rag_search_response}
+    # Recent messages
+    {recent_history}
+    # User's question
+    {message.content}
+    """
+
+    response = llm.invoke(build_response).content
+
+    # Create a proper SendMessageRequest object
+    send_message_request = SendMessageRequest(
+        channel_id=message.channel_id,
+        user_id=ai_user.id,
+        content=response
+    )
+
+    await send_message(send_message_request, BackgroundTasks())  # Pass an empty BackgroundTasks instance
+
+
+async def conversation_response(message, n_previous_messages=25):
+    # Get recent messages
+    messages = dl.get_channel_messages(message.channel_id)
+    recent_messages = messages[-n_previous_messages:]
+    
+    # Format conversation history
+    conversation_history = "\n".join([
+        f"{msg.sender.username}: {msg.content}" 
+        for msg in recent_messages
+    ])
+    
+    # Create context-aware prompt
+    context_prompt = f"""You are an AI agent that helps to manage worker chat details.
+
+Recent conversation:
+{conversation_history}
+
+Current message:
+{message.content}"""
+
+    # Run agent with updated prompt
+    result = await agent.run(context_prompt)
+    print("Agent response: ", result)
+
+    # Send response
+    ai_user = dl.get_user('1')
+    if result:
+        send_message_request = SendMessageRequest(
+            channel_id=message.channel_id,
+            user_id=ai_user.id,
+            content=str(result.data)
+        )
+        await send_message(send_message_request, BackgroundTasks())
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="localhost", port=8080)
+    uvicorn.run(app, host="localhost", port=8080, workers=4)  # Add workers parameter

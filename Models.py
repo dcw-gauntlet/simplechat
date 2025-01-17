@@ -90,3 +90,4 @@ class Chunk(BaseModel):
     file_id: str
     file_chunk: int
     text: str
+    channel_id: str

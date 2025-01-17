@@ -8,7 +8,6 @@ pytest
 httpx
 websockets
 psycopg
-python-
 langchain-text-splitters 
 langchain-community 
 langgraph
@@ -16,3 +15,5 @@ langchain-openai
 psycopg-binary
 pgvector
 pdfplumber
+python-dotenv
+psycopg_pool
